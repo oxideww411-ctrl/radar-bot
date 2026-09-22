@@ -179,8 +179,7 @@ def callback_inline(call):
         bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
         msg = bot.send_message(call.message.chat.id, "✍️ <b>Напишите ваш вопрос:</b>", parse_mode="HTML", reply_markup=get_back_markup())
         bot.register_next_step_handler(msg, process_support_msg)
-
-# ==========================================
+            # ==========================================
 # 4. АРСЕНАЛ СТРАТЕГИЙ
 # ==========================================
 def auto_scanner():
@@ -384,4 +383,54 @@ def result_checker():
                             
                     elif bet_type == "1X2":
                         if bet_val == "Home" and final_home > final_away:
-                            is_win 
+                            is_win = True
+                        elif bet_val == "Away" and final_away > final_home:
+                            is_win = True
+                        elif bet_val == "Draw" and final_home == final_away:
+                            is_win = True
+                            
+                    if is_win:
+                        cursor.execute("UPDATE stats SET wins = wins + 1")
+                        res_text = "✅ <b>СТАВКА ЗАШЛА!</b>"
+                    else:
+                        cursor.execute("UPDATE stats SET losses = losses + 1")
+                        res_text = "❌ <b>МИНУС</b>"
+                    
+                    conn.commit()
+                    cursor.execute("DELETE FROM tracked_bets_v2 WHERE fixture_id=?", (fixture_id,))
+                    conn.commit()
+                    
+                    users = get_all_users()
+                    for u in users:
+                        try:
+                            bot.send_message(u[0], f"{res_text}\n\n⚽ {home_team} — {away_team}\nИтог: <b>{final_home}:{final_away}</b>\nНаш прогноз: {prediction_text}\nКэф: {odd}", parse_mode="HTML")
+                        except Exception:
+                            pass
+
+        except Exception as e:
+            pass
+
+# ==========================================
+# 5. FLASK СЕРВЕР (ДЛЯ ОБХОДА СНА RENDER)
+# ==========================================
+app = Flask(__name__)
+
+@app.route('/')
+def keep_alive():
+    return "Radar is running 24/7!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
+
+if __name__ == '__main__':
+    Thread(target=auto_scanner, daemon=True).start()
+    Thread(target=result_checker, daemon=True).start()
+    Thread(target=run_flask, daemon=True).start()
+    
+    print("🚀 БОТ ЗАПУЩЕН НА RENDER! ВЕБ-СЕРВЕР АКТИВЕН")
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=0, timeout=20)
+        except Exception as e:
+            time.sleep(5)
+                
