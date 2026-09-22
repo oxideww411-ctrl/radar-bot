@@ -194,8 +194,20 @@ def callback_inline(call):
         bot.edit_message_text(f"📊 <b>Статистика алгоритма</b>\n\n✅ Успешных сигналов: {wins}\n❌ Минусов: {losses}\n🔥 Винрейт: {winrate}%", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=get_back_markup())
     elif call.data == "vip":
         bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
-        prices = [types.LabeledPrice(label='VIP на 1 неделю', amount=50)]
-        bot.send_invoice(call.message.chat.id, title="💎 VIP-доступ", description="Оплата подписки на 7 дней.", invoice_payload="vip", provider_token="", currency="XTR", prices=prices, reply_markup=get_back_markup())
+        try:
+            prices = [types.LabeledPrice(label='VIP на 1 неделю', amount=50)]
+            bot.send_invoice(
+                call.message.chat.id, 
+                title="💎 VIP-доступ", 
+                description="Оплата подписки на 7 дней.", 
+                invoice_payload="vip", 
+                provider_token="", 
+                currency="XTR", 
+                prices=prices, 
+                reply_markup=get_back_markup()
+            )
+        except Exception as e:
+            bot.send_message(call.message.chat.id, f"❌ <b>Ошибка кассы:</b> {e}", parse_mode="HTML", reply_markup=get_back_markup())
     elif call.data == "ref":
         ref_link = f"https://t.me/{bot.get_me().username}?start={call.message.chat.id}"
         res = execute_query("SELECT referrals FROM users WHERE user_id=%s", (call.message.chat.id,), fetch=True)
@@ -216,7 +228,8 @@ def send_prematch_signal(admin_call=False, admin_id=None):
     try:
         res = fetch_api(f"https://v3.football.api-sports.io/fixtures?date={today}")
         matches = res.get('response', [])
-        top_leagues = [39, 140, 135, 78, 61, 2, 3, 253, 71, 4, 5, 9, 15] 
+        # Добавили Лигу Чемпионов (2), Лигу Европы (3) и Женскую ЛЧ (132)
+        top_leagues = [39, 140, 135, 78, 61, 2, 3, 253, 71, 4, 5, 9, 15, 132] 
         valid_matches = [m for m in matches if m['fixture']['status']['short'] == 'NS' and m['league']['id'] in top_leagues]
         
         selected_match, pred_text, conf, best_odd = None, "", 0, 0.0
@@ -415,4 +428,4 @@ if __name__ == '__main__':
     while True:
         try: bot.polling(none_stop=True, interval=0, timeout=20)
         except Exception: time.sleep(5)
-    
+                           
