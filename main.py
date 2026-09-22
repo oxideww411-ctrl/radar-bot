@@ -81,7 +81,7 @@ def got_payment(message):
     cursor.execute("UPDATE users SET status='VIP', vip_until=? WHERE user_id=?", (expire_time, user_id))
     conn.commit()
     bot.send_message(user_id, "✅ <b>Оплата прошла успешно!</b>\n\n💎 VIP-доступ на <b>1 неделю</b> активирован.", parse_mode="HTML")
-    bot.send_message(ADMIN_ID, f"💰 <b>НОВАЯ ОПЛАТА!</b>\nПользователь <code>{user_id}</code> купил подписку!")
+    bot.send_message(ADMIN_ID, f"💰 <b>НОВАЯ ОПЛАТА! 50 Stars</b>\nПользователь <code>{user_id}</code> купил подписку!")
 
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
@@ -92,8 +92,17 @@ def admin_panel(message):
         vips = cursor.fetchone()[0]
         cursor.execute('SELECT wins, losses FROM stats')
         wins, losses = cursor.fetchone()
-        text = f"👑 <b>ПАНЕЛЬ СОЗДАТЕЛЯ</b>\n\n👥 Клиентов: {total} (VIP: {vips})\n✅ Плюсов: {wins} | ❌ Минусов: {losses}\n\nВыдать VIP: <code>/addvip [ID]</code>\nРассылка: <code>/send [текст]</code>"
+        text = f"👑 <b>ПАНЕЛЬ СОЗДАТЕЛЯ</b>\n\n👥 Клиентов: {total} (VIP: {vips})\n✅ Плюсов: {wins} | ❌ Минусов: {losses}\n\nВыдать VIP: <code>/addvip [ID]</code>\nРассылка: <code>/send [текст]</code>\nБэкап базы: <code>/backup</code>"
         bot.send_message(message.chat.id, text, parse_mode="HTML")
+
+@bot.message_handler(commands=['backup'])
+def send_backup(message):
+    if message.chat.id == ADMIN_ID:
+        try:
+            with open('radar.db', 'rb') as doc:
+                bot.send_document(message.chat.id, doc, caption="📦 Резервная копия базы данных (Пользователи, статистика, VIP)")
+        except Exception as e:
+            bot.send_message(ADMIN_ID, "❌ Ошибка при создании бэкапа.")
 
 @bot.message_handler(commands=['addvip'])
 def give_vip(message):
@@ -175,11 +184,27 @@ def callback_inline(call):
         total = wins + losses
         winrate = int((wins / total) * 100) if total > 0 else 0
         bot.edit_message_text(f"📊 <b>Статистика алгоритма</b>\n\n✅ Успешных сигналов: {wins}\n❌ Минусов: {losses}\n🔥 Винрейт: {winrate}%", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=get_back_markup())
+    elif call.data == "vip":
+        bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
+        prices = [types.LabeledPrice(label='VIP на 1 неделю', amount=50)]
+        bot.send_invoice(
+            call.message.chat.id, title="💎 VIP-доступ",
+            description="Оплата подписки на 7 дней. Доступ ко всем скрытым сигналам бота.",
+            invoice_payload="vip_subscription", provider_token="", currency="XTR", prices=prices, reply_markup=get_back_markup()
+        )
+    elif call.data == "ref":
+        bot_info = bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start={call.message.chat.id}"
+        cursor.execute("SELECT referrals FROM users WHERE user_id=?", (call.message.chat.id,))
+        res = cursor.fetchone()
+        ref_count = res[0] if res else 0
+        text = f"🔗 <b>Твоя реферальная система</b>\n\nТвоя ссылка для приглашения:\n<code>{ref_link}</code>\n\n👥 Приглашено: <b>{ref_count} чел.</b>"
+        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=get_back_markup())
     elif call.data == "support":
         bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
         msg = bot.send_message(call.message.chat.id, "✍️ <b>Напишите ваш вопрос:</b>", parse_mode="HTML", reply_markup=get_back_markup())
         bot.register_next_step_handler(msg, process_support_msg)
-            # ==========================================
+        # ==========================================
 # 4. АРСЕНАЛ СТРАТЕГИЙ
 # ==========================================
 def auto_scanner():
@@ -433,4 +458,4 @@ if __name__ == '__main__':
             bot.polling(none_stop=True, interval=0, timeout=20)
         except Exception as e:
             time.sleep(5)
-                
+    
