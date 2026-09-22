@@ -3,10 +3,10 @@ from telebot import types
 import requests
 import time
 import threading
-import sqlite3
 import datetime
 from flask import Flask
 from threading import Thread
+import psycopg2
 
 TOKEN = "8704937440:AAE2giwzq-9eFPT0FrwTJ4ApuetW5HuC7pI"
 ADMIN_ID = 1682561630 
@@ -21,6 +21,9 @@ current_key_idx = 0
 
 bot = telebot.TeleBot(TOKEN)
 signaled_matches = set()
+
+# ТВОЯ ОБЛАЧНАЯ БАЗА NEON
+DB_URL = "postgresql://neondb_owner:npg_ZJ3M4mjrHDTc@ep-cold-voice-av6zk9ax-pooler.c-11.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 def fetch_api(url):
     global current_key_idx
@@ -39,46 +42,49 @@ def fetch_api(url):
     return {}
 
 # ==========================================
-# 1. БАЗА ДАННЫХ
+# 1. ОБЛАЧНАЯ БАЗА ДАННЫХ (POSTGRESQL)
 # ==========================================
-conn = sqlite3.connect('radar.db', check_same_thread=False)
-cursor = conn.cursor()
+def execute_query(query, params=None, fetch=False, fetchall=False):
+    try:
+        conn = psycopg2.connect(DB_URL)
+        conn.autocommit = True
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        result = None
+        if fetch: result = cursor.fetchone()
+        elif fetchall: result = cursor.fetchall()
+        conn.close()
+        return result
+    except Exception as e:
+        print("DB Error:", e)
+        return None
 
-cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, status TEXT)')
+execute_query('CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, status TEXT)')
 try:
-    cursor.execute("ALTER TABLE users ADD COLUMN signals_today INTEGER DEFAULT 0")
-    cursor.execute("ALTER TABLE users ADD COLUMN last_signal_date TEXT DEFAULT ''")
-    cursor.execute("ALTER TABLE users ADD COLUMN vip_until INTEGER DEFAULT 0")
-    cursor.execute("ALTER TABLE users ADD COLUMN referrals INTEGER DEFAULT 0")
-    conn.commit()
-except Exception: pass
+    execute_query("ALTER TABLE users ADD COLUMN signals_today INTEGER DEFAULT 0")
+    execute_query("ALTER TABLE users ADD COLUMN last_signal_date TEXT DEFAULT ''")
+    execute_query("ALTER TABLE users ADD COLUMN vip_until BIGINT DEFAULT 0")
+    execute_query("ALTER TABLE users ADD COLUMN referrals INTEGER DEFAULT 0")
+except: pass
 
-cursor.execute('CREATE TABLE IF NOT EXISTS stats (wins INTEGER, losses INTEGER)')
-cursor.execute('SELECT * FROM stats')
-if not cursor.fetchone():
-    cursor.execute('INSERT INTO stats (wins, losses) VALUES (0, 0)')
+execute_query('CREATE TABLE IF NOT EXISTS stats (wins INTEGER, losses INTEGER)')
+if not execute_query('SELECT * FROM stats', fetch=True):
+    execute_query('INSERT INTO stats (wins, losses) VALUES (0, 0)')
 
-cursor.execute('''CREATE TABLE IF NOT EXISTS tracked_bets_v2 (
-    fixture_id INTEGER, home_team TEXT, away_team TEXT, bet_type TEXT, bet_val TEXT, target_value REAL, odd REAL, prediction_text TEXT)''')
-conn.commit()
+execute_query('''CREATE TABLE IF NOT EXISTS tracked_bets_v2 (
+    fixture_id BIGINT, home_team TEXT, away_team TEXT, bet_type TEXT, bet_val TEXT, target_value REAL, odd REAL, prediction_text TEXT)''')
 
 def add_user(user_id, ref_id=None):
-    cursor.execute('SELECT * FROM users WHERE user_id=?', (user_id,))
-    if not cursor.fetchone():
-        cursor.execute('INSERT INTO users (user_id, status, signals_today, last_signal_date, vip_until, referrals) VALUES (?, ?, 0, "", 0, 0)', (user_id, 'free'))
-        conn.commit()
+    if not execute_query('SELECT * FROM users WHERE user_id=%s', (user_id,), fetch=True):
+        execute_query("INSERT INTO users (user_id, status, signals_today, last_signal_date, vip_until, referrals) VALUES (%s, 'free', 0, '', 0, 0)", (user_id,))
         if ref_id and ref_id != user_id:
-            cursor.execute("UPDATE users SET referrals = referrals + 1 WHERE user_id=?", (ref_id,))
-            conn.commit()
+            execute_query("UPDATE users SET referrals = referrals + 1 WHERE user_id=%s", (ref_id,))
             return True
     return False
 
 def get_all_users():
-    current_time = int(time.time())
-    cursor.execute("UPDATE users SET status='FREE' WHERE status='VIP' AND vip_until > 0 AND vip_until < ?", (current_time,))
-    conn.commit()
-    cursor.execute('SELECT user_id, status FROM users')
-    return cursor.fetchall()
+    execute_query("UPDATE users SET status='FREE' WHERE status='VIP' AND vip_until > 0 AND vip_until < %s", (int(time.time()),))
+    return execute_query('SELECT user_id, status FROM users', fetchall=True) or []
 
 # ==========================================
 # 2. ПРИЕМ ОПЛАТЫ И АДМИНКА
@@ -90,28 +96,28 @@ def checkout(pre_checkout_query): bot.answer_pre_checkout_query(pre_checkout_que
 def got_payment(message):
     user_id = message.chat.id
     expire_time = int(time.time()) + (7 * 24 * 3600)
-    cursor.execute("UPDATE users SET status='VIP', vip_until=? WHERE user_id=?", (expire_time, user_id))
-    conn.commit()
+    execute_query("UPDATE users SET status='VIP', vip_until=%s WHERE user_id=%s", (expire_time, user_id))
     bot.send_message(user_id, "✅ <b>Оплата прошла успешно!</b>\n\n💎 VIP-доступ на <b>1 неделю</b> активирован.", parse_mode="HTML")
     bot.send_message(ADMIN_ID, f"💰 <b>НОВАЯ ОПЛАТА! 50 Stars</b>\nПользователь <code>{user_id}</code> купил подписку!")
 
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     if message.chat.id == ADMIN_ID:
-        cursor.execute('SELECT COUNT(*) FROM users')
-        total = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM users WHERE status='VIP'")
-        vips = cursor.fetchone()[0]
-        cursor.execute('SELECT wins, losses FROM stats')
-        wins, losses = cursor.fetchone()
-        bot.send_message(message.chat.id, f"👑 <b>ПАНЕЛЬ СОЗДАТЕЛЯ</b>\n\n👥 Клиентов: {total} (VIP: {vips})\n✅ Плюсов: {wins} | ❌ Минусов: {losses}\n🔑 Текущий API ключ: #{current_key_idx+1}\n\nВыдать VIP: <code>/addvip [ID]</code>\nРассылка: <code>/send [текст]</code>\nПредматч: <code>/prematch</code>\nБэкап: <code>/backup</code>", parse_mode="HTML")
+        total = execute_query('SELECT COUNT(*) FROM users', fetch=True)
+        vips = execute_query("SELECT COUNT(*) FROM users WHERE status='VIP'", fetch=True)
+        stats = execute_query('SELECT wins, losses FROM stats', fetch=True)
+        t_count = total[0] if total else 0
+        v_count = vips[0] if vips else 0
+        w_count, l_count = stats if stats else (0,0)
+        bot.send_message(message.chat.id, f"👑 <b>ПАНЕЛЬ СОЗДАТЕЛЯ (Облако активна)</b>\n\n👥 Клиентов: {t_count} (VIP: {v_count})\n✅ Плюсов: {w_count} | ❌ Минусов: {l_count}\n🔑 Текущий API ключ: #{current_key_idx+1}\n\nВыдать VIP: <code>/addvip [ID]</code>\nРассылка: <code>/send [текст]</code>\nПредматч: <code>/prematch</code>\nБэкап: <code>/backup</code>", parse_mode="HTML")
 
 @bot.message_handler(commands=['backup'])
 def send_backup(message):
     if message.chat.id == ADMIN_ID:
-        try:
-            with open('radar.db', 'rb') as doc: bot.send_document(message.chat.id, doc, caption="📦 Резервная копия базы")
-        except: pass
+        stats = execute_query('SELECT wins, losses FROM stats', fetch=True) or (0,0)
+        users = execute_query('SELECT user_id, status FROM users', fetchall=True) or []
+        text = f"☁️ <b>БАЗА В БЕЗОПАСНОСТИ (Neon)</b>\nФайл больше не нужен, данные в облаке!\n\nСтатистика: Плюсы {stats[0]} | Минусы {stats[1]}\nВсего юзеров: {len(users)}\n"
+        bot.send_message(ADMIN_ID, text, parse_mode="HTML")
 
 @bot.message_handler(commands=['addvip'])
 def give_vip(message):
@@ -119,8 +125,7 @@ def give_vip(message):
         try:
             user_id = int(message.text.split()[1])
             expire_time = int(time.time()) + (7 * 24 * 3600)
-            cursor.execute("UPDATE users SET status='VIP', vip_until=? WHERE user_id=?", (expire_time, user_id))
-            conn.commit()
+            execute_query("UPDATE users SET status='VIP', vip_until=%s WHERE user_id=%s", (expire_time, user_id))
             bot.send_message(ADMIN_ID, f"✅ VIP выдан {user_id}!")
         except: pass
 
@@ -179,13 +184,12 @@ def callback_inline(call):
     if call.data == "main_menu":
         bot.edit_message_text("🟢 <b>Radar Bet | Сканер запущен</b>\n\n🔎 <i>ИИ сканирует линию по Индексу Давления в реальном времени...</i>", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=get_main_markup())
     elif call.data == "profile":
-        cursor.execute('SELECT status, vip_until FROM users WHERE user_id = ?', (call.message.chat.id,))
-        res = cursor.fetchone()
+        res = execute_query('SELECT status, vip_until FROM users WHERE user_id = %s', (call.message.chat.id,), fetch=True)
         status_text = f"<b>VIP</b> (до {datetime.datetime.fromtimestamp(res[1]).strftime('%d.%m.%Y')})" if res and res[0].upper() == "VIP" and res[1] > 0 else "<b>FREE</b>"
         bot.edit_message_text(f"📱 <b>Профиль</b>\nID: <code>{call.message.chat.id}</code>\nСтатус: {status_text}", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=get_back_markup())
     elif call.data == "stats":
-        cursor.execute('SELECT wins, losses FROM stats')
-        wins, losses = cursor.fetchone()
+        stats = execute_query('SELECT wins, losses FROM stats', fetch=True)
+        wins, losses = stats if stats else (0,0)
         winrate = int((wins / (wins + losses)) * 100) if (wins + losses) > 0 else 0
         bot.edit_message_text(f"📊 <b>Статистика алгоритма</b>\n\n✅ Успешных сигналов: {wins}\n❌ Минусов: {losses}\n🔥 Винрейт: {winrate}%", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=get_back_markup())
     elif call.data == "vip":
@@ -194,8 +198,8 @@ def callback_inline(call):
         bot.send_invoice(call.message.chat.id, title="💎 VIP-доступ", description="Оплата подписки на 7 дней.", invoice_payload="vip", provider_token="", currency="XTR", prices=prices, reply_markup=get_back_markup())
     elif call.data == "ref":
         ref_link = f"https://t.me/{bot.get_me().username}?start={call.message.chat.id}"
-        cursor.execute("SELECT referrals FROM users WHERE user_id=?", (call.message.chat.id,))
-        ref_count = cursor.fetchone()[0]
+        res = execute_query("SELECT referrals FROM users WHERE user_id=%s", (call.message.chat.id,), fetch=True)
+        ref_count = res[0] if res else 0
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🚀 Поделиться с другом", url=f"https://t.me/share/url?url={ref_link}&text=Лови крутого бота для ставок - Radar Bet!"))
         markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="main_menu"))
@@ -223,9 +227,8 @@ def send_prematch_signal(admin_call=False, admin_id=None):
             if not pred_res.get('response'): continue
             home_perc = int(pred_res['response'][0]['predictions']['percent']['home'].replace('%', ''))
             
-            # Поиск ВАЛУЯ (ошибка букмекера)
             if home_perc >= 60:
-                expected_odd = 1 / (home_perc / 100) # Реальная вероятность
+                expected_odd = 1 / (home_perc / 100)
                 odds_res = fetch_api(f"https://v3.football.api-sports.io/odds?fixture={fix_id}")
                 if odds_res.get('response') and odds_res['response'][0].get('bookmakers'):
                     for b in odds_res['response'][0]['bookmakers'][0]['bets']:
@@ -233,7 +236,6 @@ def send_prematch_signal(admin_call=False, admin_id=None):
                             for val in b['values']:
                                 if val['value'] == 'Home':
                                     odd = float(val['odd'])
-                                    # Если бук дает кэф больше, чем реальная математика (Валуй!)
                                     if 1.60 <= odd <= 1.95 and odd >= (expected_odd * 1.05):
                                         selected_match, pred_text, conf, best_odd = match, pred_res['response'][0]['predictions']['advice'], home_perc, odd
                                         break
@@ -244,7 +246,7 @@ def send_prematch_signal(admin_call=False, admin_id=None):
         if selected_match:
             home, away = selected_match['teams']['home']['name'], selected_match['teams']['away']['name']
             m_time = datetime.datetime.fromtimestamp(selected_match['fixture']['timestamp']).strftime('%H:%M')
-            msg = f"📋 <b>ПРЕДМАТЧ | ВАЛУЙ НАЙДЕН</b>\n\n⚽ {home} — {away}\n🕒 Начало в {m_time}\n\n🎯 <b>Прогноз:</b> Победа 1 (П1)\n🔥 <b>Кэф:</b> {best_odd}\n📊 <b>Уверенность ИИ:</b> {conf}%\n\n💡 <i>Алгоритм выявил недооцененный коэффициент (Value Bet). {pred_text}</i>"
+            msg = f"📋 <b>ПРЕДМАТЧ | ВАЛУЙ НАЙДЕН</b>\n\n⚽ {home} — {away}\n🕒 Начало в {m_time}\n\n🎯 <b>Прогноз:</b> Победа 1 (П1)\n🔥 <b>Кэф:</b> {best_odd}\n📊 <b>Уверенность ИИ:</b> {conf}%\n\n💡 <i>Алгоритм выявил недооцененный коэффициент. {pred_text}</i>"
             for u in get_all_users():
                 try: bot.send_message(u[0], msg, parse_mode="HTML")
                 except: pass
@@ -296,13 +298,11 @@ def auto_scanner():
                         if i['type'] == name and i['value'] is not None: return int(str(i['value']).replace('%', ''))
                     return 0
                 
-                # ВЫЧИСЛЯЕМ ИНДЕКС ДАВЛЕНИЯ (Pressure Index)
                 h_pi = (get_val(home_stats, "Dangerous Attacks") * 1.2) + (get_val(home_stats, "Shots on Goal") * 4) + (get_val(home_stats, "Corner Kicks") * 2.5)
                 a_pi = (get_val(away_stats, "Dangerous Attacks") * 1.2) + (get_val(away_stats, "Shots on Goal") * 4) + (get_val(away_stats, "Corner Kicks") * 2.5)
                 
                 prediction, confidence, reason, bet_type, bet_val, target_value = None, 0, "", "", "", 0.0
                 
-                # Динамические сценарии по Индексу
                 if 25 <= minute <= 40 and goals_sum == 0 and (h_pi + a_pi) < 45:
                     prediction, confidence, reason, bet_type, bet_val, target_value = "Тотал Меньше (ТМ) 1.5", 85, f"Мертвая игра. Индекс давления команд минимальный ({int(h_pi+a_pi)}).", "OU", "Under", 1.5
                 elif 60 <= minute <= 80 and h_pi >= 70 and a_pi >= 70 and goals_sum >= 1:
@@ -331,17 +331,15 @@ def auto_scanner():
                     
                     if 1.40 <= real_odd <= 2.20:
                         signaled_matches.add(fixture_id)
-                        cursor.execute('INSERT INTO tracked_bets_v2 (fixture_id, home_team, away_team, bet_type, bet_val, target_value, odd, prediction_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 
+                        execute_query('INSERT INTO tracked_bets_v2 (fixture_id, home_team, away_team, bet_type, bet_val, target_value, odd, prediction_text) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)', 
                                        (fixture_id, home_team, away_team, bet_type, bet_val, target_value, real_odd, prediction))
-                        conn.commit()
                         
                         signal_text = f"⚡️ <b>СИГНАЛ РАДАРА</b>\n⚽ {home_team} — {away_team} | {minute}' | Счёт: <b>{score}</b>\n\n🎯 <b>Исход:</b> {prediction}\n🔥 <b>Лайв-кэф:</b> {real_odd}\n📊 <b>Уверенность ИИ:</b> {confidence}%\n\n💡 <i>Анализ: {reason}</i>"
                         teaser_text = f"🔒 <b>СИГНАЛ СКРЫТ</b>\nАлгоритм нашел ставку с вероятностью {confidence}% на матч <b>{home_team} — {away_team}</b>.\n⚠️ Оформи VIP!"
 
                         for user in users:
                             u_id, u_status = user[0], user[1]
-                            cursor.execute("SELECT signals_today, last_signal_date FROM users WHERE user_id=?", (u_id,))
-                            row = cursor.fetchone()
+                            row = execute_query("SELECT signals_today, last_signal_date FROM users WHERE user_id=%s", (u_id,), fetch=True)
                             sig_today, last_date = (row[0], row[1]) if row else (0, "")
                             if last_date != current_date: sig_today, last_date = 0, current_date
 
@@ -352,22 +350,19 @@ def auto_scanner():
                                 if sig_today < 1:
                                     try: bot.send_message(u_id, signal_text, parse_mode="HTML")
                                     except: pass
-                                    cursor.execute("UPDATE users SET signals_today=1, last_signal_date=? WHERE user_id=?", (current_date, u_id))
-                                    conn.commit()
+                                    execute_query("UPDATE users SET signals_today=1, last_signal_date=%s WHERE user_id=%s", (current_date, u_id))
                                 elif sig_today == 1:
                                     try: bot.send_message(u_id, teaser_text, parse_mode="HTML")
                                     except: pass
-                                    cursor.execute("UPDATE users SET signals_today=2 WHERE user_id=?", (u_id,))
-                                    conn.commit()
+                                    execute_query("UPDATE users SET signals_today=2 WHERE user_id=%s", (u_id,))
         except Exception: pass
-        time.sleep(150) # Спим 2.5 минуты (лимитов теперь 400, можем себе позволить!)
+        time.sleep(150) 
 
 def result_checker():
     while True:
         time.sleep(600) 
         try:
-            cursor.execute('SELECT fixture_id, home_team, away_team, bet_type, bet_val, target_value, odd, prediction_text FROM tracked_bets_v2')
-            bets = cursor.fetchall()
+            bets = execute_query('SELECT fixture_id, home_team, away_team, bet_type, bet_val, target_value, odd, prediction_text FROM tracked_bets_v2', fetchall=True)
             if not bets: continue 
             
             for f_id, h_team, a_team, b_type, b_val, t_val, odd, pred_txt in bets:
@@ -389,15 +384,13 @@ def result_checker():
                         elif b_val == "Draw" and f_home == f_away: is_win = True
                             
                     if is_win:
-                        cursor.execute("UPDATE stats SET wins = wins + 1")
+                        execute_query("UPDATE stats SET wins = wins + 1")
                         res_text = "✅ <b>СТАВКА ЗАШЛА!</b>"
                     else:
-                        cursor.execute("UPDATE stats SET losses = losses + 1")
+                        execute_query("UPDATE stats SET losses = losses + 1")
                         res_text = "❌ <b>МИНУС</b>"
                     
-                    conn.commit()
-                    cursor.execute("DELETE FROM tracked_bets_v2 WHERE fixture_id=?", (f_id,))
-                    conn.commit()
+                    execute_query("DELETE FROM tracked_bets_v2 WHERE fixture_id=%s", (f_id,))
                     
                     for u in get_all_users():
                         try: bot.send_message(u[0], f"{res_text}\n\n⚽ {h_team} — {a_team}\nИтог: <b>{f_home}:{f_away}</b>\nНаш прогноз: {pred_txt}\nКэф: {odd}", parse_mode="HTML")
@@ -405,11 +398,11 @@ def result_checker():
         except Exception: pass
 
 # ==========================================
-# 5. FLASK СЕРВЕР (ДЛЯ ОБХОДА СНА RENDER)
+# 5. СЕРВЕР RENDER
 # ==========================================
 app = Flask(__name__)
 @app.route('/')
-def keep_alive(): return "Radar is running 24/7!"
+def keep_alive(): return "Radar is running on Cloud DB!"
 def run_flask(): app.run(host="0.0.0.0", port=10000)
 
 if __name__ == '__main__':
@@ -418,8 +411,8 @@ if __name__ == '__main__':
     Thread(target=result_checker, daemon=True).start()
     Thread(target=run_flask, daemon=True).start()
     
-    print("🚀 БОТ ЗАПУЩЕН! РАБОТАЮТ 4 API КЛЮЧА")
+    print("🚀 БОТ ЗАПУЩЕН! ОБЛАКО АКТИВНО")
     while True:
         try: bot.polling(none_stop=True, interval=0, timeout=20)
         except Exception: time.sleep(5)
-                        
+    
